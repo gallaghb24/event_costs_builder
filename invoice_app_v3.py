@@ -57,9 +57,35 @@ def process_timesheet(file) -> pd.DataFrame:
         tmp_file.write(file.getbuffer())
         tmp_path = tmp_file.name
     
-    # Read the timesheet
-    timesheet_df = pd.read_csv(tmp_path)
-    os.remove(tmp_path)
+    # Read the timesheet with encoding fallbacks
+    encodings_to_try = ["utf-8-sig", "utf-16", "latin1", "cp1252"]
+    timesheet_df = None
+    last_exception = None
+
+    try:
+        for encoding in encodings_to_try:
+            try:
+                timesheet_df = pd.read_csv(tmp_path, encoding=encoding)
+                break
+            except UnicodeDecodeError as exc:
+                last_exception = exc
+            except Exception as exc:
+                last_exception = exc
+                break
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+    if timesheet_df is None:
+        if isinstance(last_exception, UnicodeDecodeError):
+            st.error(
+                "Unable to read the uploaded timesheet. Please upload a CSV encoded as UTF-8 or UTF-16."
+            )
+        elif last_exception is not None:
+            st.error(f"Failed to read the uploaded timesheet: {last_exception}")
+        else:
+            st.error("Unable to read the uploaded timesheet.")
+        return pd.DataFrame()
     
     # Extract job number prefix (e.g., SDG2161 from 1/SDG2161)
     timesheet_df['Job_Prefix'] = timesheet_df['Job Number'].str.extract(r'1/(SDG\d+)')
