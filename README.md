@@ -199,6 +199,10 @@ The app uses the included `recalc.py` script to recalculate Excel formulas using
 - Install LibreOffice for formula recalculation
 - Check that all referenced cells exist
 
+## Manual QA Checklist
+
+- **Macro-enabled template download**: Load an `.xlsm` invoice template that contains VBA macros, generate an invoice, and confirm the downloaded file keeps the `.xlsm` extension and opens in Excel without macro-related warnings or corruption prompts.
+
 **Mis
 ## 🛠️ Installation
 

@@ -143,7 +143,7 @@ def load_template(file) -> Dict:
         tmp_path = tmp_file.name
     
     wb = load_workbook(tmp_path, data_only=False, keep_vba=True)
-    
+
     # Store formatting information for each sheet
     formatting_info = {}
     for sheet_name in wb.sheetnames:
@@ -187,7 +187,8 @@ def load_template(file) -> Dict:
         'oab_clients': [],
         'studio_types': ['Artwork', 'Creative Artwork', 'Digital'],
         'wb': wb,
-        'formatting': formatting_info
+        'formatting': formatting_info,
+        'has_macros': bool(getattr(wb, 'vba_archive', None)),
     }
     
     # Extract client names from Event Summary sheets
@@ -325,9 +326,12 @@ def apply_formatting(sheet, formatting_info):
         except:
             pass  # Skip if merge fails
 
-def generate_invoice(template_info: Dict, studio_df: pd.DataFrame, print_df: pd.DataFrame, 
-                     event_name: str, event_code: str) -> str:
-    """Generate the invoice Excel file with proper formatting"""
+def generate_invoice(template_info: Dict, studio_df: pd.DataFrame, print_df: pd.DataFrame,
+                     event_name: str, event_code: str) -> Tuple[str, str, str]:
+    """Generate the invoice Excel file with proper formatting.
+
+    Returns a tuple of (output_path, download_filename, mime_type).
+    """
     
     # Load the template
     wb = load_workbook(template_info['path'], data_only=False, keep_vba=True)
@@ -442,11 +446,20 @@ def generate_invoice(template_info: Dict, studio_df: pd.DataFrame, print_df: pd.
                 apply_formatting(sheet, template_info['formatting'][sheet_name])
     
     # Save the file with event code in filename
-    output_path = f'/tmp/{event_code}_Superdrug_ITG_Invoice_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx'
+    now = datetime.now()
+    extension = '.xlsm' if template_info.get('has_macros') else '.xlsx'
+    output_path = f"/tmp/{event_code}_Superdrug_ITG_Invoice_{now.strftime('%Y%m%d_%H%M%S')}{extension}"
     wb.save(output_path)
     wb.close()
-    
-    return output_path
+
+    download_filename = f"{event_code}_Superdrug_ITG_Invoice_{now.strftime('%Y%m%d')}{extension}"
+    mime_type = (
+        'application/vnd.ms-excel.sheet.macroEnabled.12'
+        if extension == '.xlsm'
+        else 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+
+    return output_path, download_filename, mime_type
 
 # Main UI
 st.title("📊 Superdrug ITG Invoice Generator v3.0")
@@ -460,7 +473,7 @@ with st.sidebar:
     st.subheader("1. Upload Template")
     template_file = st.file_uploader(
         "Select Excel Template",
-        type=['xlsx'],
+        type=['xlsx', 'xlsm'],
         help="Upload the Superdrug ITG Invoice Template"
     )
     
@@ -478,6 +491,7 @@ with st.sidebar:
             st.write(f"**Sheets:** {len(info['sheets'])}")
             st.write(f"**Core Clients:** {len(info['core_clients'])}")
             st.write(f"**OAB Clients:** {len(info['oab_clients'])}")
+            st.write(f"**Has Macros:** {'Yes' if info.get('has_macros') else 'No'}")
 
 # Main content area
 if st.session_state.template_loaded:
@@ -842,30 +856,30 @@ if st.session_state.template_loaded:
             if st.button("🚀 Generate Invoice", type="primary", use_container_width=True):
                 with st.spinner("Generating invoice with formatting..."):
                     try:
-                        output_file = generate_invoice(
+                        output_file, download_name, mime_type = generate_invoice(
                             st.session_state.template_info,
                             st.session_state.studio_data,
                             st.session_state.print_data,
                             event_name,
                             event_code
                         )
-                        
+
                         st.session_state.generated_file = output_file
                         st.success(f"✅ Invoice generated successfully!")
-                        
+
                         # Provide download button
                         with open(output_file, 'rb') as f:
                             excel_data = f.read()
-                        
+
                         st.download_button(
                             label="📥 Download Invoice",
                             data=excel_data,
-                            file_name=f"{event_code}_Superdrug_ITG_Invoice_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            file_name=download_name,
+                            mime=mime_type,
                             use_container_width=True
                         )
-                        
-                        st.info(f"Filename: {event_code}_Superdrug_ITG_Invoice_{datetime.now().strftime('%Y%m%d')}.xlsx")
+
+                        st.info(f"Filename: {download_name}")
                         
                     except Exception as e:
                         st.error(f"Error generating invoice: {str(e)}")
