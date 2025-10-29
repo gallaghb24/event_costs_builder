@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.comments import Comment
 from openpyxl.utils import get_column_letter
 import os
 import subprocess
@@ -231,62 +232,110 @@ def load_production_files(files) -> pd.DataFrame:
     return combined_df
 
 def filter_production_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Apply filtering rules to production data"""
-    # Define statuses to exclude
-    exclude_statuses = [
-        'draft', 'saved', 'awaiting rfq', 'rfq responses', 
+    """Apply production data enhancements without removing rows."""
+    if df.empty:
+        return df
+
+    # Define statuses that previously triggered exclusion
+    exclude_statuses = {
+        'draft', 'saved', 'awaiting rfq', 'rfq responses',
         'estimates awaiting approval', 'client approved estimates'
-    ]
-    
-    # Filter based on Production Supplier Brief Status
+    }
+
+    df = df.copy()
+
     if 'Production Supplier Brief Status' in df.columns:
-        # Convert to lowercase for comparison
-        status_lower = df['Production Supplier Brief Status'].str.lower().fillna('')
-        
-        # Keep rows that don't match any exclude status
-        mask = ~status_lower.isin(exclude_statuses)
-        df = df[mask]
-    
+        status_series = df['Production Supplier Brief Status']
+        status_stripped = status_series.apply(lambda x: x.strip() if isinstance(x, str) else x)
+        status_lower = status_stripped.fillna('').str.lower()
+
+        df['Production Supplier Brief Status'] = status_stripped
+        df['Production Status Note'] = np.where(
+            status_lower.isin(exclude_statuses),
+            'check status/cost as line not in production yet',
+            ''
+        )
+    else:
+        df['Production Status Note'] = ''
+
     return df
 
 def prepare_print_data(df: pd.DataFrame) -> pd.DataFrame:
     """Prepare data for the Print tab"""
-    # Exclude 'not applicable' from Production Supplier Brief Status
-    if 'Production Supplier Brief Status' in df.columns:
-        mask = df['Production Supplier Brief Status'].str.lower() != 'not applicable'
-        print_df = df[mask].copy()
-    else:
-        print_df = df.copy()
-    
     # Return the dataframe with all original columns for correct mapping
-    return print_df
+    return df.copy()
 
 def prepare_studio_data(df: pd.DataFrame) -> pd.DataFrame:
     """Prepare data for the Studio tab - aggregate at job level"""
-    # Include all for studio (including 'not applicable' Production status)
-    # But exclude Content Brief Status = 'not applicable'
-    if 'Content Brief Status' in df.columns:
-        mask = df['Content Brief Status'].str.lower() != 'not applicable'
-        studio_df = df[mask].copy()
+    base_columns = [
+        'Project Ref', 'Event Name', 'Project Description', 'Project Owner',
+        'Lines', 'Studio Hours', 'Type', 'Core/OAB', 'Studio Comment'
+    ]
+
+    if df.empty or 'Project Ref' not in df.columns:
+        return pd.DataFrame(columns=base_columns)
+
+    comment_text = 'check all lines are approved, artwork hours may require updating'
+
+    working_df = df.copy()
+
+    if 'Content Brief Status' in working_df.columns:
+        status_series = working_df['Content Brief Status']
+        status_stripped = status_series.apply(lambda x: x.strip() if isinstance(x, str) else x)
+        status_lower = status_stripped.fillna('').str.lower()
+        working_df['Content Brief Status'] = status_stripped
     else:
-        studio_df = df.copy()
-    
-    # Group by Project Ref to get job-level data
-    grouped = studio_df.groupby('Project Ref').agg({
+        status_lower = pd.Series([''] * len(working_df), index=working_df.index, dtype='object')
+
+    working_df['__status_lower'] = status_lower
+
+    status_groups = working_df.groupby('Project Ref')['__status_lower'].apply(list)
+
+    keep_projects = []
+    comment_projects = set()
+
+    for project_ref, statuses in status_groups.items():
+        if not statuses:
+            keep_projects.append(project_ref)
+            comment_projects.add(project_ref)
+            continue
+
+        unique_statuses = set(statuses)
+        if unique_statuses and unique_statuses <= {'not applicable'}:
+            continue  # Skip projects that are entirely "not applicable"
+
+        keep_projects.append(project_ref)
+
+        if any(status != 'completed' for status in statuses):
+            comment_projects.add(project_ref)
+
+    if not keep_projects:
+        return pd.DataFrame(columns=base_columns)
+
+    filtered_df = working_df[working_df['Project Ref'].isin(keep_projects)].copy()
+
+    valid_rows = filtered_df[filtered_df['__status_lower'] != 'not applicable'].copy()
+
+    if valid_rows.empty:
+        return pd.DataFrame(columns=base_columns)
+
+    grouped = valid_rows.groupby('Project Ref').agg({
         'Event Name': 'first',
         'Project Description': 'first',
         'Project Owner': 'first',
         'Brief Ref': 'count'  # Count of lines per job
     }).reset_index()
-    
-    # Rename columns
+
     grouped.columns = ['Project Ref', 'Event Name', 'Project Description', 'Project Owner', 'Lines']
-    
-    # Add empty columns for user input - no defaults
+
     grouped['Studio Hours'] = None  # Will be filled from timesheet
     grouped['Type'] = ''  # Will be filled from timesheet
     grouped['Core/OAB'] = ''  # Will be filled from timesheet
-    
+    grouped['Studio Comment'] = ''
+
+    if comment_projects:
+        grouped.loc[grouped['Project Ref'].isin(comment_projects), 'Studio Comment'] = comment_text
+
     return grouped
 
 def apply_formatting(sheet, formatting_info):
@@ -367,22 +416,29 @@ def generate_invoice(template_info: Dict, studio_df: pd.DataFrame, print_df: pd.
             sheet[f'C{idx}'] = job['Project Description']
             sheet[f'D{idx}'] = job['Project Owner']
             sheet[f'E{idx}'] = job['Lines']
-            
+
             # Add hours and type if available
             if pd.notna(job.get('Studio Hours')):
                 sheet[f'F{idx}'] = job['Studio Hours']
             if job.get('Type'):
                 sheet[f'G{idx}'] = job['Type']
-            
+
             # Formula for rate
             sheet[f'H{idx}'] = f'=IF(G{idx}="Artwork",49.5,IF(G{idx}="Creative Artwork",57,IF(G{idx}="Digital",49.5,0)))'
-            
+
             # Formula for cost
             sheet[f'I{idx}'] = f'=F{idx}*H{idx}'
-            
+
             # Core/OAB if available
             if job.get('Core/OAB'):
                 sheet[f'J{idx}'] = job['Core/OAB']
+
+            # Add studio comment if applicable
+            comment_value = job.get('Studio Comment', '')
+            if pd.notna(comment_value):
+                comment_text = str(comment_value).strip()
+                if comment_text:
+                    sheet[f'A{idx}'].comment = Comment(comment_text, "Status")
     
     # Populate Print sheet
     if 'Print' in wb.sheetnames and not print_df.empty:
@@ -430,6 +486,13 @@ def generate_invoice(template_info: Dict, studio_df: pd.DataFrame, print_df: pd.
             sheet[f'W{idx}'] = item.get('Content Brief Status', '')  # Content Brief Status
             sheet[f'X{idx}'] = item.get('Production Supplier Brief Status', '')  # Production Supplier Brief Status
             sheet[f'Y{idx}'] = item.get('Production Sell Price', 0)  # Production Cost (from Sell Price)
+
+            # Add production status comment when flagged
+            status_note = item.get('Production Status Note', '')
+            if pd.notna(status_note):
+                status_note_text = str(status_note).strip()
+                if status_note_text:
+                    sheet[f'X{idx}'].comment = Comment(status_note_text, "Status")
             
             # Column Z: Core/OAB lookup formula
             sheet[f'Z{idx}'] = f'=IF(Y{idx}>0,IFERROR(VLOOKUP(A{idx},Studio!$A$3:$J$6129,10,FALSE),""),"")' 
@@ -666,7 +729,10 @@ if st.session_state.template_loaded:
             edit_df['Studio Hours'] = edit_df['Studio Hours'].fillna(0.0)
             edit_df['Type'] = edit_df['Type'].replace('', 'Artwork')
             edit_df['Core/OAB'] = edit_df['Core/OAB'].replace('', 'CORE')
-            
+            if 'Studio Comment' not in edit_df.columns:
+                edit_df['Studio Comment'] = ''
+            edit_df['Studio Comment'] = edit_df['Studio Comment'].fillna('')
+
             # Create editable columns configuration
             column_config = {
                 "Project Ref": st.column_config.TextColumn("Project Ref", disabled=True),
@@ -688,6 +754,12 @@ if st.session_state.template_loaded:
                     required=True
                 )
             }
+
+            if 'Studio Comment' in edit_df.columns:
+                column_config["Studio Comment"] = st.column_config.TextColumn(
+                    "Note",
+                    disabled=True
+                )
             
             edited_studio = st.data_editor(
                 edit_df,
