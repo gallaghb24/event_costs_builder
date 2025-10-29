@@ -267,15 +267,14 @@ def prepare_print_data(df: pd.DataFrame) -> pd.DataFrame:
 
 def prepare_studio_data(df: pd.DataFrame) -> pd.DataFrame:
     """Prepare data for the Studio tab - aggregate at job level"""
-    base_columns = [
-        'Project Ref', 'Event Name', 'Project Description', 'Project Owner',
-        'Lines', 'Studio Hours', 'Type', 'Core/OAB', 'Studio Comment'
-    ]
-
-    if df.empty or 'Project Ref' not in df.columns:
-        return pd.DataFrame(columns=base_columns)
+    if df.empty:
+        return pd.DataFrame(columns=[
+            'Project Ref', 'Event Name', 'Project Description', 'Project Owner',
+            'Lines', 'Studio Hours', 'Type', 'Core/OAB', 'Studio Comment'
+        ])
 
     comment_text = 'check all lines are approved, artwork hours may require updating'
+    note_statuses = {'not applicable'}
 
     working_df = df.copy()
 
@@ -284,57 +283,49 @@ def prepare_studio_data(df: pd.DataFrame) -> pd.DataFrame:
         status_stripped = status_series.apply(lambda x: x.strip() if isinstance(x, str) else x)
         status_lower = status_stripped.fillna('').str.lower()
         working_df['Content Brief Status'] = status_stripped
+        working_df['__status_lower'] = status_lower
+
+        # Keep only rows that are not exclusively "not applicable" for aggregation
+        valid_rows = working_df[~working_df['__status_lower'].isin(note_statuses)].copy()
+
+        if valid_rows.empty:
+            return pd.DataFrame(columns=[
+                'Project Ref', 'Event Name', 'Project Description', 'Project Owner',
+                'Lines', 'Studio Hours', 'Type', 'Core/OAB', 'Studio Comment'
+            ])
+
+        grouped = valid_rows.groupby('Project Ref').agg({
+            'Event Name': 'first',
+            'Project Description': 'first',
+            'Project Owner': 'first',
+            'Brief Ref': 'count'  # Count of lines per job
+        }).reset_index()
+
+        note_projects = working_df[
+            working_df['__status_lower'].isin(note_statuses)
+        ]['Project Ref'].dropna().unique()
+
+        working_df = working_df.drop(columns=['__status_lower'])
     else:
-        status_lower = pd.Series([''] * len(working_df), index=working_df.index, dtype='object')
+        grouped = working_df.groupby('Project Ref').agg({
+            'Event Name': 'first',
+            'Project Description': 'first',
+            'Project Owner': 'first',
+            'Brief Ref': 'count'
+        }).reset_index()
+        note_projects = []
 
-    working_df['__status_lower'] = status_lower
-
-    status_groups = working_df.groupby('Project Ref')['__status_lower'].apply(list)
-
-    keep_projects = []
-    comment_projects = set()
-
-    for project_ref, statuses in status_groups.items():
-        if not statuses:
-            keep_projects.append(project_ref)
-            comment_projects.add(project_ref)
-            continue
-
-        unique_statuses = set(statuses)
-        if unique_statuses and unique_statuses <= {'not applicable'}:
-            continue  # Skip projects that are entirely "not applicable"
-
-        keep_projects.append(project_ref)
-
-        if any(status != 'completed' for status in statuses):
-            comment_projects.add(project_ref)
-
-    if not keep_projects:
-        return pd.DataFrame(columns=base_columns)
-
-    filtered_df = working_df[working_df['Project Ref'].isin(keep_projects)].copy()
-
-    valid_rows = filtered_df[filtered_df['__status_lower'] != 'not applicable'].copy()
-
-    if valid_rows.empty:
-        return pd.DataFrame(columns=base_columns)
-
-    grouped = valid_rows.groupby('Project Ref').agg({
-        'Event Name': 'first',
-        'Project Description': 'first',
-        'Project Owner': 'first',
-        'Brief Ref': 'count'  # Count of lines per job
-    }).reset_index()
-
+    # Rename columns
     grouped.columns = ['Project Ref', 'Event Name', 'Project Description', 'Project Owner', 'Lines']
 
+    # Add empty columns for user input - no defaults
     grouped['Studio Hours'] = None  # Will be filled from timesheet
     grouped['Type'] = ''  # Will be filled from timesheet
     grouped['Core/OAB'] = ''  # Will be filled from timesheet
     grouped['Studio Comment'] = ''
 
-    if comment_projects:
-        grouped.loc[grouped['Project Ref'].isin(comment_projects), 'Studio Comment'] = comment_text
+    if len(note_projects) > 0:
+        grouped.loc[grouped['Project Ref'].isin(note_projects), 'Studio Comment'] = comment_text
 
     return grouped
 
