@@ -73,5 +73,5 @@ def test_prepare_studio_data_sets_comment_for_non_completed_statuses():
     assert result.loc['SDG3000', 'Lines'] == 2
     assert result.loc['SDG3000', 'Studio Comment'] == comment
 
-    assert result.loc['SDG4000', 'Lines'] == 2
+    assert result.loc['SDG4000', 'Lines'] == 1
     assert result.loc['SDG4000', 'Studio Comment'] == comment
